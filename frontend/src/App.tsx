@@ -30,7 +30,10 @@ import {
   Loader2,
   X,
   ChevronRight,
-  Activity
+  Activity,
+  Mail,
+  Github,
+  Users
 } from 'lucide-react';
 
 // Fix for default marker icon issue with webpack
@@ -977,6 +980,38 @@ function App() {
           <p><strong>Data Source:</strong> <a href="https://power.larc.nasa.gov/" target="_blank" rel="noopener noreferrer">NASA POWER Project</a></p>
           <p><strong>Technologies:</strong> React, TypeScript, Python, scikit-learn, NASA APIs</p>
           <p><AlertTriangle size={14} /> <em>ML forecasts are experimental and not suitable for critical decisions.</em></p>
+        </div>
+        
+        <div className="makers-section">
+          <h3><Users size={18} /> Made by</h3>
+          <div className="makers-grid">
+            <div className="maker-card">
+              <h4>Aman Verma</h4>
+              <div className="maker-contacts">
+                <a href="mailto:akverma8121@gmail.com" className="contact-link">
+                  <Mail size={16} />
+                  akverma8121@gmail.com
+                </a>
+                <a href="https://github.com/amanvermaa01" target="_blank" rel="noopener noreferrer" className="contact-link">
+                  <Github size={16} />
+                  @amanvermaa01
+                </a>
+              </div>
+            </div>
+            <div className="maker-card">
+              <h4>Yuvraj Dixit</h4>
+              <div className="maker-contacts">
+                <a href="mailto:yuvrajdixit20.com" className="contact-link">
+                  <Mail size={16} />
+                  yuvrajdixit20.com
+                </a>
+                <a href="https://github.com/yuvrajdixit" target="_blank" rel="noopener noreferrer" className="contact-link">
+                  <Github size={16} />
+                  @yuvrajdixit
+                </a>
+              </div>
+            </div>
+          </div>
         </div>
       </footer>
     </div>
