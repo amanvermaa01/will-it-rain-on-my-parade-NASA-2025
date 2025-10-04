@@ -85,7 +85,7 @@ def test_nasa_api():
         "community": "RE",
         "longitude": longitude,
         "latitude": latitude,
-        "start": "20200101",  # Smaller range for testing
+        "start": "20100101",  # Use a longer range to ensure enough years for percentiles
         "end": "20231231",
         "format": "JSON"
     }

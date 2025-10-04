@@ -5,6 +5,18 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
 import logging
+import os
+from genai_weather import GenAIWeatherForecaster
+from datetime import timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
+# ML imports for forecast endpoint (copied from simple_app.py)
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
+import joblib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -12,6 +24,30 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+# Initialize the GenAI weather forecaster
+genai_forecaster = None
+
+def init_genai_forecaster():
+    global genai_forecaster
+    # Read API key and model from environment. API key can also be provided via other secure means.
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    # Fallback: read from local file if present (useful for local dev). File should contain only the key.
+    if not api_key:
+        local_key_path = os.path.join(os.path.dirname(__file__), '.openrouter_key')
+        if os.path.exists(local_key_path):
+            try:
+                with open(local_key_path, 'r', encoding='utf-8') as f:
+                    api_key = f.read().strip()
+            except Exception:
+                api_key = None
+    model_name = os.environ.get("GENAI_MODEL_NAME", "deepseek/deepseek-chat-v3.1:free")
+
+    if not api_key:
+        logger.warning("OPENROUTER_API_KEY not set in environment. GenAI features will be limited or unavailable.")
+
+    genai_forecaster = GenAIWeatherForecaster(api_key=api_key, model_name=model_name)
+    logger.info(f"GenAI forecaster initialized with model: {model_name}")
 
 POWER_API_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
@@ -131,6 +167,148 @@ def analyze_multiple_parameters(data_dict, month, day):
     
     return results
 
+
+def create_weather_features(dates, location_lat, location_lng):
+    """Create features for ML model based on date and location."""
+    features = []
+    for date in dates:
+        # Temporal features
+        day_of_year = date.timetuple().tm_yday
+        month = date.month
+        day = date.day
+
+        # Seasonal features (cyclical encoding)
+        day_of_year_sin = np.sin(2 * np.pi * day_of_year / 365.25)
+        day_of_year_cos = np.cos(2 * np.pi * day_of_year / 365.25)
+
+        month_sin = np.sin(2 * np.pi * month / 12)
+        month_cos = np.cos(2 * np.pi * month / 12)
+
+        # Location features
+        lat_normalized = location_lat / 90.0  # Normalize latitude
+        lng_normalized = location_lng / 180.0  # Normalize longitude
+
+        # Distance from equator (affects temperature patterns)
+        distance_from_equator = abs(location_lat) / 90.0
+
+        # Approximate distance from ocean (simplified)
+        is_coastal = 1 if abs(location_lng) > 10 and abs(location_lat) < 60 else 0
+
+        feature_row = [
+            day_of_year_sin, day_of_year_cos,
+            month_sin, month_cos,
+            lat_normalized, lng_normalized,
+            distance_from_equator, is_coastal,
+            month, day  # Keep original for reference
+        ]
+
+        features.append(feature_row)
+
+    return np.array(features)
+
+
+def prepare_training_data(data_dict, location_lat, location_lng):
+    """Prepare training data from historical weather data."""
+    try:
+        # Focus on temperature data for forecasting
+        if 'T2M' not in data_dict:
+            return None, None, None
+
+        temp_data = data_dict['T2M']
+        dates = []
+        temperatures = []
+
+        for date_str, temp in temp_data.items():
+            if temp != -999:  # Valid data
+                date_obj = datetime.strptime(date_str, '%Y%m%d')
+                dates.append(date_obj)
+                temperatures.append(temp)
+
+        if len(dates) < 100:  # Need sufficient data
+            return None, None, None
+
+        # Create features
+        features = create_weather_features(dates, location_lat, location_lng)
+        targets = np.array(temperatures)
+
+        return features, targets, dates
+
+    except Exception as e:
+        logger.error(f"Error preparing training data: {str(e)}")
+        return None, None, None
+
+
+def train_weather_model(features, targets):
+    """Train a Random Forest model for weather forecasting."""
+    try:
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            features, targets, test_size=0.2, random_state=42
+        )
+
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        # Train model
+        model = RandomForestRegressor(
+            n_estimators=100,
+            max_depth=10,
+            random_state=42,
+            n_jobs=-1
+        )
+
+        model.fit(X_train_scaled, y_train)
+
+        # Evaluate
+        train_predictions = model.predict(X_train_scaled)
+        test_predictions = model.predict(X_test_scaled)
+
+        train_mae = mean_absolute_error(y_train, train_predictions)
+        test_mae = mean_absolute_error(y_test, test_predictions)
+
+        logger.info(f"Model trained - Train MAE: {train_mae:.2f}, Test MAE: {test_mae:.2f}")
+
+        return model, scaler, test_mae
+
+    except Exception as e:
+        logger.error(f"Error training model: {str(e)}")
+        return None, None, None
+
+
+def generate_forecast(model, scaler, location_lat, location_lng, target_date, num_days=7):
+    """Generate weather forecast for specified dates."""
+    try:
+        # Generate forecast dates
+        forecast_dates = [target_date + timedelta(days=i) for i in range(num_days)]
+
+        # Create features for forecast dates
+        forecast_features = create_weather_features(forecast_dates, location_lat, location_lng)
+        forecast_features_scaled = scaler.transform(forecast_features)
+
+        # Make predictions
+        predictions = model.predict(forecast_features_scaled)
+
+        # Calculate confidence intervals (simplified)
+        prediction_std = np.std(predictions) * 0.5  # Simplified uncertainty
+
+        forecast_results = []
+        for i, (date, temp) in enumerate(zip(forecast_dates, predictions)):
+            forecast_results.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "predicted_temperature": round(float(temp), 2),
+                "confidence_lower": round(float(temp - prediction_std), 2),
+                "confidence_upper": round(float(temp + prediction_std), 2),
+                "day_offset": i
+            })
+
+        return forecast_results
+
+    except Exception as e:
+        logger.error(f"Error generating forecast: {str(e)}")
+        return None
+
 @app.route('/api/analyze', methods=['POST'])
 def analyze_weather():
     try:
@@ -140,7 +318,6 @@ def analyze_weather():
         required_fields = ['latitude', 'longitude', 'month', 'day']
         if not all(k in data for k in required_fields):
             return jsonify({"error": "Missing required parameters: latitude, longitude, month, day"}), 400
-
         latitude = float(data['latitude'])
         longitude = float(data['longitude'])
         month = int(data['month'])
@@ -155,7 +332,6 @@ def analyze_weather():
             return jsonify({"error": "Invalid month. Must be between 1 and 12"}), 400
         if not (1 <= day <= 31):
             return jsonify({"error": "Invalid day. Must be between 1 and 31"}), 400
-
         # Parameters for NASA POWER API
         parameters = ["T2M", "PRECTOTCORR", "WS2M"]  # Temperature, Precipitation, Wind Speed
         
@@ -180,10 +356,8 @@ def analyze_weather():
         parameter_data = nasa_data.get("properties", {}).get("parameter", {})
         if not parameter_data:
             return jsonify({"error": "No data found for this location"}), 404
-
         # Analyze the data
         analysis_results = analyze_multiple_parameters(parameter_data, month, day)
-
         if not analysis_results:
             return jsonify({"error": f"Not enough data to analyze for {month:02d}/{day:02d} at this location"}), 404
         
@@ -198,17 +372,221 @@ def analyze_weather():
         }
         
         return jsonify(analysis_results)
-        
+    except ValueError as e:
+        return jsonify({"error": f"Invalid input data: {str(e)}"}), 400
     except requests.exceptions.Timeout:
         return jsonify({"error": "Request timeout. NASA API may be slow. Please try again."}), 504
     except requests.exceptions.RequestException as e:
         logger.error(f"NASA API request failed: {str(e)}")
         return jsonify({"error": f"Failed to fetch data from NASA API: {str(e)}"}), 502
-    except ValueError as e:
-        return jsonify({"error": f"Invalid input data: {str(e)}"}), 400
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         return jsonify({"error": "An unexpected error occurred. Please try again."}), 500
+
+@app.route('/api/genai-forecast', methods=['POST'])
+def genai_forecast():
+    try:
+        data = request.get_json()
+        
+        # Validate input
+        required_fields = ['latitude', 'longitude', 'month', 'day']
+        if not all(k in data for k in required_fields):
+            return jsonify({"error": "Missing required parameters: latitude, longitude, month, day"}), 400
+            
+        latitude = float(data['latitude'])
+        longitude = float(data['longitude'])
+        month = int(data['month'])
+        day = int(data['day'])
+        
+        # Initialize the GenAI forecaster with hardcoded values
+        init_genai_forecaster()
+        
+        if not genai_forecaster:
+            return jsonify({"error": "GenAI forecaster not initialized. Please provide a valid API key."}), 400
+        
+        # Get historical data
+        params = {
+            "parameters": "T2M,PRECTOTCORR,WS2M",
+            "community": "RE",
+            "longitude": longitude,
+            "latitude": latitude,
+            "start": "19900101",
+            "end": "20231231",
+            "format": "JSON"
+        }
+        
+        response = requests.get(POWER_API_URL, params=params, timeout=30)
+        response.raise_for_status()
+        nasa_data = response.json()
+        
+        # Extract parameter data
+        parameter_data = nasa_data.get("properties", {}).get("parameter", {})
+        if not parameter_data:
+            return jsonify({"error": "No historical data found for this location"}), 404
+            
+        # Analyze historical data
+        historical_analysis = analyze_multiple_parameters(parameter_data, month, day)
+        
+        if not historical_analysis:
+            return jsonify({"error": "Not enough historical data to analyze"}), 404
+            
+        # For demonstration, we'll use the historical data as a proxy for forecast data
+        # In a real implementation, you would fetch actual forecast data from a weather API
+        forecast_data = {
+            "forecast": [
+                {
+                    "date": f"2024-{month:02d}-{day:02d}",
+                    "temperature": historical_analysis.get('temperature', {}).get('average_temp', 20),
+                    "precipitation": historical_analysis.get('precipitation', {}).get('average_precip', 0),
+                    "wind_speed": historical_analysis.get('wind', {}).get('average_wind', 5)
+                }
+            ]
+        }
+        
+        # Format the date
+        date_str = f"{month:02d}/{day:02d}/2024"
+        
+        # Generate the GenAI forecast (returns a plain dict)
+        genai_result = genai_forecaster.generate_forecast(
+            historical_data=historical_analysis,
+            forecast_data=forecast_data,
+            latitude=latitude,
+            longitude=longitude,
+            date=date_str
+        )
+
+        if isinstance(genai_result, dict):
+            genai_forecast = genai_result
+        else:
+            # Defensive: try to convert to dict
+            try:
+                genai_forecast = dict(genai_result)
+            except Exception:
+                genai_forecast = {"summary": str(genai_result)}
+
+        result = {
+            "genai_forecast": genai_forecast,
+            "historical_analysis": historical_analysis,
+            "metadata": {
+                "location": {"latitude": latitude, "longitude": longitude},
+                "query_date": date_str,
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+        
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"error": f"Invalid input data: {str(e)}"}), 400
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Request timeout. NASA API may be slow. Please try again."}), 504
+    except requests.exceptions.RequestException as e:
+        logger.error(f"NASA API request failed: {str(e)}")
+        return jsonify({"error": f"Failed to fetch data from NASA API: {str(e)}"}), 502
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({"error": "An unexpected error occurred. Please try again."}), 500
+
+
+@app.route('/api/forecast', methods=['POST'])
+def forecast_weather():
+    try:
+        data = request.get_json()
+
+        # Validate input
+        required_fields = ['latitude', 'longitude', 'date']
+        if not all(k in data for k in required_fields):
+            return jsonify({"error": "Missing required parameters: latitude, longitude, date"}), 400
+
+        latitude = float(data['latitude'])
+        longitude = float(data['longitude'])
+        forecast_date = data['date']  # Expected format: YYYY-MM-DD
+        num_days = int(data.get('days', 7))  # Default 7 days
+
+        # Validate ranges
+        if not (-90 <= latitude <= 90):
+            return jsonify({"error": "Invalid latitude. Must be between -90 and 90"}), 400
+        if not (-180 <= longitude <= 180):
+            return jsonify({"error": "Invalid longitude. Must be between -180 and 180"}), 400
+        if not (1 <= num_days <= 14):
+            return jsonify({"error": "Invalid days. Must be between 1 and 14"}), 400
+
+        # Parse target date
+        try:
+            target_date = datetime.strptime(forecast_date, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        # Fetch historical data for training
+        parameters = ["T2M", "PRECTOTCORR", "WS2M"]
+
+        params = {
+            "parameters": ",".join(parameters),
+            "community": "RE",
+            "longitude": longitude,
+            "latitude": latitude,
+            "start": "19950101",
+            "end": "20231231",
+            "format": "JSON"
+        }
+
+        logger.info(f"Training ML model for lat={latitude}, lon={longitude}, forecast from {forecast_date}")
+
+        # Fetch data from NASA POWER API
+        response = requests.get(POWER_API_URL, params=params, timeout=30)
+        response.raise_for_status()
+        nasa_data = response.json()
+
+        # Extract parameter data
+        parameter_data = nasa_data.get("properties", {}).get("parameter", {})
+        if not parameter_data:
+            return jsonify({"error": "No historical data found for this location"}), 404
+
+        # Prepare training data
+        features, targets, training_dates = prepare_training_data(parameter_data, latitude, longitude)
+        if features is None:
+            return jsonify({"error": "Insufficient data to train forecasting model"}), 404
+
+        # Train model
+        model, scaler, mae = train_weather_model(features, targets)
+        if model is None:
+            return jsonify({"error": "Failed to train forecasting model"}), 500
+
+        # Generate forecast
+        forecast_results = generate_forecast(model, scaler, latitude, longitude, target_date, num_days)
+        if forecast_results is None:
+            return jsonify({"error": "Failed to generate forecast"}), 500
+
+        # Prepare response
+        response_data = {
+            "forecast": forecast_results,
+            "model_accuracy": {
+                "mean_absolute_error": round(float(mae), 2),
+                "training_data_points": len(targets),
+                "training_period": f"{min(training_dates).year}-{max(training_dates).year}"
+            },
+            "metadata": {
+                "location": {"latitude": latitude, "longitude": longitude},
+                "forecast_start_date": forecast_date,
+                "forecast_days": num_days,
+                "model_type": "Random Forest Regression",
+                "data_source": "NASA POWER Project",
+                "generated_timestamp": datetime.now().isoformat(),
+                "disclaimer": "This is an ML-generated forecast based on historical patterns. Not suitable for critical decisions."
+            }
+        }
+
+        return jsonify(response_data)
+
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Request timeout. NASA API may be slow. Please try again."}), 504
+    except requests.exceptions.RequestException as e:
+        logger.error(f"NASA API request failed: {str(e)}")
+        return jsonify({"error": f"Failed to fetch data from NASA API"}), 502
+    except ValueError as e:
+        return jsonify({"error": f"Invalid input data: {str(e)}"}), 400
+    except Exception as e:
+        logger.error(f"Unexpected error in forecast: {str(e)}")
+        return jsonify({"error": "An unexpected error occurred during forecasting. Please try again."}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():

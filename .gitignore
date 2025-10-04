@@ -1,4 +1,12 @@
-# NASA Weather Analyzer - .gitignore
+# Local secrets and environment files
+backend/.openrouter_key
+.env
+__pycache__/
+*.pyc
+venv/
+env/
+/.idea
+.vscode# NASA Weather Analyzer - .gitignore
 
 # Dependencies
 node_modules/

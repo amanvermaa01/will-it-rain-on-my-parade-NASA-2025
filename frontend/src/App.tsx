@@ -5,6 +5,8 @@ import L from 'leaflet';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import 'leaflet/dist/leaflet.css';
 import './App.css';
+import GenAIForecast from './components/GenAIForecast';
+import './components/GenAIForecast.css';
 
 // Lucide React Icons
 import {
@@ -583,6 +585,16 @@ function LocationMarker({ position, setPosition, onMapReady }: { position: Posit
 }
 
 function ResultsDisplay({ data }: { data: WeatherAnalysis }) {
+  // Extract location information from metadata
+  const latitude = data.metadata?.location.latitude || 0;
+  const longitude = data.metadata?.location.longitude || 0;
+  const locationName = "Selected Location"; // This would ideally come from geocoding
+  
+  // Extract date information
+  const dateParts = data.metadata?.query_date?.split('/') || [];
+  const month = parseInt(dateParts[0] || '1');
+  const day = parseInt(dateParts[1] || '1');
+  
   return (
     <div className="results-container">
       <h2><Satellite size={24} /> Weather Analysis Results</h2>
@@ -906,6 +918,8 @@ function App() {
                   <p>Longitude: {position.lng.toFixed(4)}°</p>
                 </div>
               )}
+
+              {/* metadata card removed per user request */}
               
               <button 
                 className="analyze-button"
@@ -952,6 +966,8 @@ function App() {
                   ) : (
                     <WeatherCharts data={results} />
                   )}
+                  
+                  {/* GenAI panel moved to sidebar to avoid duplication */}
                 </>
               )}
               
@@ -968,50 +984,92 @@ function App() {
             onLocationSelect={handleRecentLocationSelect}
             onClearSearches={clearRecentSearches}
           />
+
+          {/* Place GenAI panel to the right below recent searches */}
+          {( (results && results.metadata) || (analysisMode === 'forecast' && forecastResults && forecastResults.metadata) ) && (
+            <div className="genai-sidebar-panel">
+              <div className="recent-searches-card">
+                <div className="recent-searches-header">
+                  <h3><Activity size={18} /> AI-Powered Weather Insights</h3>
+                  <div className="recent-searches-controls">
+                    {/* Optional button area - could include settings or refresh in future */}
+                    <button className="secondary-button" title="Refresh insights">Refresh</button>
+                  </div>
+                </div>
+                <div className="recent-searches-body">
+                  {(() => {
+                    const sourceMeta = analysisMode === 'forecast' && forecastResults && forecastResults.metadata ? forecastResults.metadata : results!.metadata!;
+                    const lat = sourceMeta.location?.latitude ?? 0;
+                    const lon = sourceMeta.location?.longitude ?? 0;
+
+                    // Type guards to narrow union type for metadata
+                    const hasForecastStartDate = (m: any): m is { forecast_start_date: string } => {
+                      return m && typeof m.forecast_start_date === 'string';
+                    };
+                    const hasQueryDate = (m: any): m is { query_date: string } => {
+                      return m && typeof m.query_date === 'string';
+                    };
+
+                    // query_date in historical is MM/DD, forecast_start_date in forecast metadata is YYYY-MM-DD
+                    let monthVal = 1;
+                    let dayVal = 1;
+                    let forecastDateVal: string | undefined = undefined;
+
+                    if (analysisMode === 'forecast' && hasForecastStartDate(sourceMeta)) {
+                      const parts = sourceMeta.forecast_start_date.split('-');
+                      monthVal = parseInt(parts[1] || '1');
+                      dayVal = parseInt(parts[2] || '1');
+                      forecastDateVal = sourceMeta.forecast_start_date;
+                    } else if (hasQueryDate(sourceMeta)) {
+                      const parts = (sourceMeta.query_date || '1/1').split('/');
+                      monthVal = parseInt(parts[0] || '1');
+                      dayVal = parseInt(parts[1] || '1');
+                    }
+
+                    const locName = sourceMeta.location ? `Lat ${sourceMeta.location.latitude.toFixed(2)}, Lon ${sourceMeta.location.longitude.toFixed(2)}` : 'Selected Location';
+
+                    return (
+                      <GenAIForecast
+                        latitude={lat}
+                        longitude={lon}
+                        month={monthVal}
+                        day={dayVal}
+                        locationName={locName}
+                        analysisMode={analysisMode}
+                        forecastDate={forecastDateVal}
+                      />
+                    );
+                  })()}
+                </div>
+              </div>
+            </div>
+          )}
         </aside>
       </div>
       
       <footer className="app-footer">
-        <div className="about-section">
+        <div className="app-footer-inner">
+        <div className="footer-column about-column">
           <h3><Eye size={18} /> About This App</h3>
-          <p>This application combines <strong>NASA POWER Project</strong> satellite data with machine learning 
-             to provide both historical weather analysis and AI-powered forecasting. Historical analysis uses 
-             30+ years of observations (1990-2023), while forecasts use trained ML models.</p>
-          <p><strong>Data Source:</strong> <a href="https://power.larc.nasa.gov/" target="_blank" rel="noopener noreferrer">NASA POWER Project</a></p>
+          <p>This application combines <strong>NASA POWER Project</strong> satellite data with machine learning to provide both historical weather analysis and AI-powered forecasting. Historical analysis uses 30+ years of observations (1990-2023), while forecasts use trained ML models.</p>
+          <p><strong>Data Source:</strong> NASA POWER Project</p>
           <p><strong>Technologies:</strong> React, TypeScript, Python, scikit-learn, NASA APIs</p>
           <p><AlertTriangle size={14} /> <em>ML forecasts are experimental and not suitable for critical decisions.</em></p>
         </div>
-        
-        <div className="makers-section">
+
+        <div className="footer-column makers-column">
           <h3><Users size={18} /> Made by</h3>
-          <div className="makers-grid">
-            <div className="maker-card">
-              <h4>Aman Verma</h4>
-              <div className="maker-contacts">
-                <a href="mailto:akverma8121@gmail.com" className="contact-link">
-                  <Mail size={16} />
-                  akverma8121@gmail.com
-                </a>
-                <a href="https://github.com/amanvermaa01" target="_blank" rel="noopener noreferrer" className="contact-link">
-                  <Github size={16} />
-                  @amanvermaa01
-                </a>
-              </div>
-            </div>
-            <div className="maker-card">
-              <h4>Yuvraj Dixit</h4>
-              <div className="maker-contacts">
-                <a href="mailto:yuvrajdixit20.com" className="contact-link">
-                  <Mail size={16} />
-                  yuvrajdixit20.com
-                </a>
-                <a href="https://github.com/yuvrajdixit" target="_blank" rel="noopener noreferrer" className="contact-link">
-                  <Github size={16} />
-                  @yuvrajdixit
-                </a>
-              </div>
-            </div>
+          <div className="maker-item">
+            <div className="maker-name">Aman Verma</div>
+            <div className="maker-contact">akverma8121@gmail.com</div>
+            <div className="maker-contact">@amanvermaa01</div>
           </div>
+          <div className="maker-item">
+            <div className="maker-name">Yuvraj Dixit</div>
+            <div className="maker-contact">yuvrajdixit20.com</div>
+            <div className="maker-contact">@yuvrajdixit</div>
+          </div>
+        </div>
         </div>
       </footer>
     </div>
