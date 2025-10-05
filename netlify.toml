@@ -1,0 +1,10 @@
+[build]
+  # change this to point to your frontend build command & directory
+  command = "cd frontend && npm run build"
+  publish = "frontend/build"
+
+# redirect all paths to index.html so client-side routing works
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
